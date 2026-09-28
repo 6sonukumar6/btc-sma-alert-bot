@@ -1,0 +1,51 @@
+name: CoinDCX BTC SMA Touch Alert
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: coindcx-sma-alert-run
+  cancel-in-progress: false
+
+jobs:
+  check-and-alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run scanner
+        env:
+          PAIR: "B-BTC_USDT"
+          SOURCE: "futures"
+          INTERVAL: "15m"
+          FAST_LEN: "50"
+          SLOW_LEN: "200"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: npm start
+
+      - name: Commit updated state file
+        run: |
+          git config user.name "sma-alert-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if git diff --quiet -- data/state.json; then
+            echo "No state change — nothing to commit."
+          else
+            git add data/state.json
+            git commit -m "Update SMA state [skip ci]"
+            git push
+          fi
