@@ -1,12 +1,40 @@
 const { fetchClosedCandles, INTERVAL_MS } = require("../coindcx/candles");
 const { sma } = require("../indicators/sma");
-const { loadState, saveState } = require("../storage/alertStore");
+const { loadState } = require("../storage/alertStore");
 const config = require("../config/config");
 
 // Minimum extra candles fetched beyond the slow SMA length (60 x 15m = 15h).
 const MIN_CATCH_UP_CANDLES = 60;
 // Upper limit on how far back the bot will catch up (700 x 15m = ~7 days).
 const MAX_CATCH_UP_CANDLES = 700;
+
+function esc(v) {
+  return String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function crossoverMessage(kind, pair, interval, candle, fastVal, slowVal, nowMs, intervalMs) {
+  const isGolden = kind === "golden";
+  const emoji = isGolden ? "🟢" : "🔴";
+  const label = isGolden ? "Golden Cross" : "Death Cross";
+  const direction = isGolden ? "above" : "below";
+  const isLate = nowMs - candle.closeTime > 2 * intervalMs;
+
+  let msg =
+    `${emoji} <b>${label}</b> on ${esc(pair)} (${esc(interval)})\n` +
+    `50 SMA crossed ${direction} 200 SMA\n` +
+    `50 SMA: $${fastVal.toLocaleString(undefined, { maximumFractionDigits: 2 })}\n` +
+    `200 SMA: $${slowVal.toLocaleString(undefined, { maximumFractionDigits: 2 })}\n` +
+    `Price: $${candle.close.toLocaleString()}\n` +
+    `Time: ${formatIST(candle.closeTime)}`;
+
+  if (isLate) {
+    msg +=
+      `\n\n⏱ <b>Late alert</b> — this happened at the time above but was only detected now ` +
+      `(${formatIST(nowMs)}) because a scheduled run was missed.`;
+  }
+
+  return msg;
+}
 
 function formatIST(ms) {
   return (
@@ -23,6 +51,12 @@ function formatIST(ms) {
 }
 
 /**
+ * Sends TWO kinds of Telegram alerts:
+ *  1. Crossover alert — sent immediately when the 50 SMA crosses the 200 SMA
+ *     (Golden Cross / Death Cross).
+ *  2. Touch alert — sent once, the first time price touches the 50 SMA after
+ *     that crossover.
+ *
  * Two modes, derived from saved state:
  *
  *  WAIT_TOUCH  (a crossover happened, no touch alert sent yet)
@@ -33,6 +67,7 @@ function formatIST(ms) {
  *
  *  WAIT_CROSS  (touch alert already sent for the latest crossover, or none seen yet)
  *      -> touch checks are PAUSED; only "has a new crossover formed?" is checked.
+ *         A new crossover sends its own alert and switches back to WAIT_TOUCH.
  *
  * MISSED RUNS: every closed candle since the last successful run is processed in
  * order, and the look-back window automatically grows to cover the whole gap. So
@@ -93,7 +128,6 @@ async function scanMarket(pair = config.PAIR, interval = config.INTERVAL) {
       : null;
 
   const alertMessages = [];
-  let staleDropped = 0; // alerts for superseded (older) crossovers that were discarded
 
   for (let i = startIdx; i < n; i++) {
     const c = candles[i];
@@ -103,21 +137,18 @@ async function scanMarket(pair = config.PAIR, interval = config.INTERVAL) {
     const wasAbove = fast[i - 1] > slow[i - 1];
     const isBelow = fast[i] < slow[i];
 
-    // 1) Always watch for a NEW crossover (in both modes).
-    //    A newer crossover REPLACES the older one: any touch alert that was queued
-    //    in this same catch-up run for the OLDER crossover is stale, so drop it.
+    // 1) Always watch for a NEW crossover (in both modes). A crossover now
+    //    sends its own alert immediately, separate from the touch alert.
     if (wasBelow && isAbove) {
-      staleDropped += alertMessages.length;
-      alertMessages.length = 0;
       state.lastCross = "golden";
       state.touchedSinceCross = false; // -> WAIT_TOUCH
+      alertMessages.push(crossoverMessage("golden", pair, interval, c, fast[i], slow[i], nowMs, intervalMs));
       continue;
     }
     if (wasAbove && isBelow) {
-      staleDropped += alertMessages.length;
-      alertMessages.length = 0;
       state.lastCross = "death";
       state.touchedSinceCross = false; // -> WAIT_TOUCH
+      alertMessages.push(crossoverMessage("death", pair, interval, c, fast[i], slow[i], nowMs, intervalMs));
       continue;
     }
 
@@ -135,7 +166,7 @@ async function scanMarket(pair = config.PAIR, interval = config.INTERVAL) {
         const isLate = nowMs - c.closeTime > 2 * intervalMs;
 
         let msg =
-          `🎯 *Price ${how} 50 SMA* on ${pair} (${interval})\n` +
+          `🎯 <b>Price ${how} 50 SMA</b> on ${esc(pair)} (${esc(interval)})\n` +
           `First retest since the ${state.lastCross === "golden" ? "Golden" : "Death"} Cross — acting as ${direction}\n` +
           `50 SMA: $${fast[i].toLocaleString(undefined, { maximumFractionDigits: 2 })}\n` +
           `Price: $${c.close.toLocaleString()}\n` +
@@ -143,7 +174,7 @@ async function scanMarket(pair = config.PAIR, interval = config.INTERVAL) {
 
         if (isLate) {
           msg +=
-            `\n\n⏱ *Late alert* — this happened at the time above but was only detected now ` +
+            `\n\n⏱ <b>Late alert</b> — this happened at the time above but was only detected now ` +
             `(${formatIST(nowMs)}) because a scheduled run was missed.`;
         }
 
@@ -154,7 +185,8 @@ async function scanMarket(pair = config.PAIR, interval = config.INTERVAL) {
   }
 
   state.lastCandleTime = latest.closeTime;
-  saveState(state);
+  // NOTE: state is NOT saved here. bot.js saves it only after alerts were delivered,
+  // so a failed Telegram send is retried on the next run instead of being lost.
 
   const mode =
     state.lastCross && !state.touchedSinceCross
@@ -163,6 +195,7 @@ async function scanMarket(pair = config.PAIR, interval = config.INTERVAL) {
 
   return {
     alertMessages,
+    newState: state,
     mode,
     debug: {
       pair,
@@ -173,7 +206,6 @@ async function scanMarket(pair = config.PAIR, interval = config.INTERVAL) {
       candleCloseIST: formatIST(latest.closeTime),
       candlesProcessed: Math.max(0, n - startIdx),
       gapWarning,
-      staleDropped,
     },
   };
 }
