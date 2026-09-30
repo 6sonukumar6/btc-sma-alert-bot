@@ -16,15 +16,10 @@ function crossoverMessage(kind, pair, interval, candle, fastVal, slowVal, nowMs,
   const isGolden = kind === "golden";
   const emoji = isGolden ? "🟢" : "🔴";
   const label = isGolden ? "Golden Cross" : "Death Cross";
-  const direction = isGolden ? "above" : "below";
   const isLate = nowMs - candle.closeTime > 2 * intervalMs;
 
   let msg =
     `${emoji} <b>${label}</b> on ${esc(pair)} (${esc(interval)})\n` +
-    `50 SMA crossed ${direction} 200 SMA\n` +
-    `50 SMA: $${fastVal.toLocaleString(undefined, { maximumFractionDigits: 2 })}\n` +
-    `200 SMA: $${slowVal.toLocaleString(undefined, { maximumFractionDigits: 2 })}\n` +
-    `Price: $${candle.close.toLocaleString()}\n` +
     `Time: ${formatIST(candle.closeTime)}`;
 
   if (isLate) {
@@ -161,15 +156,11 @@ async function scanMarket(pair = config.PAIR, interval = config.INTERVAL) {
       const brokeThrough = sidePrev !== 0 && sideNow !== 0 && sidePrev !== sideNow;
 
       if (inRange || brokeThrough) {
-        const direction = state.lastCross === "golden" ? "support" : "resistance";
         const how = inRange ? "touched" : "broke through";
         const isLate = nowMs - c.closeTime > 2 * intervalMs;
 
         let msg =
           `🎯 <b>Price ${how} 50 SMA</b> on ${esc(pair)} (${esc(interval)})\n` +
-          `First retest since the ${state.lastCross === "golden" ? "Golden" : "Death"} Cross — acting as ${direction}\n` +
-          `50 SMA: $${fast[i].toLocaleString(undefined, { maximumFractionDigits: 2 })}\n` +
-          `Price: $${c.close.toLocaleString()}\n` +
           `Time: ${formatIST(c.closeTime)}`;
 
         if (isLate) {
