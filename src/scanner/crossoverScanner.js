@@ -2,6 +2,7 @@ const { fetchClosedCandles, INTERVAL_MS } = require("../coindcx/candles");
 const { sma } = require("../indicators/sma");
 const { loadState } = require("../storage/alertStore");
 const config = require("../config/config");
+const { runEntryFilters } = require("../filters/entryFilters");
 
 // Minimum extra candles fetched beyond the slow SMA length (60 x 15m = 15h).
 const MIN_CATCH_UP_CANDLES = 60;
@@ -158,10 +159,18 @@ async function scanMarket(pair = config.PAIR, interval = config.INTERVAL) {
       if (inRange || brokeThrough) {
         const how = inRange ? "touched" : "broke through";
         const isLate = nowMs - c.closeTime > 2 * intervalMs;
+        const direction = state.lastCross === "golden" ? "up" : "down";
+
+        const { passedCount, total, results } = await runEntryFilters(pair, candles, fast, slow, i, direction);
+        const checklist = results
+          .map((r) => `${r.pass === null ? "➖" : r.pass ? "✅" : "❌"} ${esc(r.name)}`)
+          .join("\n");
 
         let msg =
           `🎯 <b>Price ${how} 50 SMA</b> on ${esc(pair)} (${esc(interval)})\n` +
-          `Time: ${formatIST(c.closeTime)}`;
+          `Time: ${formatIST(c.closeTime)}\n\n` +
+          `<b>Filters passed: ${passedCount}/${total}</b>\n` +
+          checklist;
 
         if (isLate) {
           msg +=
